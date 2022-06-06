@@ -30,9 +30,123 @@ end
 
 # ╔═╡ 39cb807e-e59b-11ec-05c1-9b6ee69a7d64
 begin
-	include("src/spe_templates.jl")
-	include("src/pulse_templates.jl")
-	include("src/waveforms.jl")
+	# Structs
+	abstract type SPEDistribution{T} end
+	struct ExponTruncNormalSPE{T}
+	    expon_rate::T
+	    norm_sigma::T
+	    norm_mu::T
+	    trunc_low::T
+	    expon_weight::T
+	end
+	
+	# Distribution factories
+	make_spe_dist(d::SPEDistribution{T}) where T = error("not implemented")
+	
+	function make_spe_dist(d::ExponTruncNormalSPE{T}) where T
+	    norm = Normal(d.norm_mu, d.norm_sigma)
+	    tnorm = truncated(norm, lower=d.trunc_low)
+	
+	    expon = Exponential(d.expon_rate)
+	    dist = MixtureModel([expon, tnorm], [d.expon_weight, 1 - d.expon_weight])
+	        
+	    return dist
+	end
+	
+	abstract type PulseShape{T} end
+	struct GumbelPulse{T} <: PulseShape{T}
+	    sigma::T
+	    amplitude::T
+	end
+	
+	make_pulse_dist(p::T) where {T <:PulseShape} = error("not implemented")
+	make_pulse_dist(p::GumbelPulse{T}) where {T} = mu -> Gumbel(mu, p.sigma)
+	
+	
+	struct PMTWaveform{T}
+	    photon_times::AbstractVector{T}
+	    photon_charges::AbstractVector{T}
+	    pulse_shape::PulseShape{T}
+	end
+	
+	
+	function evaluate_waveform(times, wf::PMTWaveform{T}) where T
+	    pulse_dist = make_pulse_dist(wf.pulse_shape)
+	    
+	    evaluated_wf = zeros(T, size(times))
+	
+	    for (ptime, pcharge) in zip(wf.photon_times, wf.photon_charges)
+	        evaluated_wf += pdf.(pulse_dist(ptime), times) .* pcharge .* wf.pulse_shape.amplitude
+	    end
+	
+	    evaluated_wf
+	
+	end
+	
+	function add_gaussian_white_noise(values, scale)
+	    values .+ randn(size(values)) * scale
+	end
+	
+	
+	struct DigitizedWaveform{T}
+	    timestamps::AbstractVector{T}
+	    values::AbstractVector{T}
+	end
+	
+	
+	function digitize_waveform(
+	    true_waveform::PMTWaveform{T},
+	    sampling_frequency::T,
+	    digitizer_frequency::T,
+	    noise_amp::T,
+	    filter,
+	    eval_range::Tuple{T, T},
+	    ) where T
+	    
+	    dt = 1/sampling_frequency # ns
+	    timesteps = range(eval_range[1], eval_range[2], step=dt)
+	
+	    waveform_values = evaluate_waveform(timesteps, true_waveform)
+	    waveform_values_noise = add_gaussian_white_noise(waveform_values, noise_amp)
+	
+	    waveform_filtered = filt(filter, waveform_values_noise)
+	
+	    resampling_rate = digitizer_frequency / sampling_frequency
+	    new_interval = range(eval_range[1], eval_range[2], step=1/digitizer_frequency)
+	    waveform_resampled = resample(waveform_filtered, resampling_rate)
+	
+	    new_interval, waveform_resampled
+	end
+	
+	function make_nnls_matrix(
+	    pulse_times::AbstractVector{T},
+	    pulse_shape::PulseShape,
+	    timestamps::AbstractVector{T}) where {T}
+	
+	    nnls_matrix = zeros(T, size(timestamps, 1), size(pulse_times, 1))
+	
+	    for i in 1:size(pulse_times, 1)
+	        pulse = make_pulse_dist(pulse_shape)(pulse_times[i])
+	        nnls_matrix[:, i] = pulse_shape.amplitude .* pdf.(pulse, timestamps)
+	    end
+	
+	    nnls_matrix
+	    
+	end
+	
+	
+	function apply_nnls(
+	    pulse_times::AbstractVector{T},
+	    pulse_shape::PulseShape{T},
+	    timestamps::AbstractVector{T},
+	    waveform::AbstractVector{T}) where {T}
+	
+	    matrix = make_nnls_matrix(pulse_times, pulse_shape, timestamps)
+	    charges = nonneg_lsq(matrix, waveform; alg=:nnls)[:, 1]
+	end
+	
+	
+	
 end
 
 # ╔═╡ ffd29632-7e6e-4925-b7e2-3814ee23ebb6
@@ -1367,7 +1481,7 @@ version = "0.9.1+5"
 
 # ╔═╡ Cell order:
 # ╠═c8f490da-d689-4f2b-8dcb-497c05973157
-# ╠═39cb807e-e59b-11ec-05c1-9b6ee69a7d64
+# ╟─39cb807e-e59b-11ec-05c1-9b6ee69a7d64
 # ╟─ffd29632-7e6e-4925-b7e2-3814ee23ebb6
 # ╟─3d7f7651-a64d-416c-9ea9-7455520fa7d7
 # ╠═c45eec73-54a0-463c-a752-2e7bccb82310
